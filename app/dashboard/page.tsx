@@ -184,38 +184,67 @@ export default function DashboardPage() {
   const handleFileChange = async (field: string, file: File | undefined, isNewColumn = false) => {
     if (!file) return;
 
+    // 1. Set temporary loading state
+    const originalLabel = isNewColumn ? newCol[field] : editForm[field];
+    const loadingText = 'Uploading...';
+    
+    if (isNewColumn) {
+      setNewCol(prev => ({ ...prev, [field]: loadingText }));
+    } else {
+      setEditForm(prev => ({ ...prev, [field]: loadingText }));
+    }
+
     try {
-      // 1. Get the Presigned URL from your backend
-      const res = await fetch('/api/upload/s3', {
+      // ---------------------------------------------------------
+      // STEP 1: Get the Presigned URL from your Backend
+      // ---------------------------------------------------------
+      const presignRes = await fetch('/api/upload', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileName: file.name, fileType: file.type }),
+        headers: {
+          'Content-Type': 'application/json', // <--- IMPORTANT: Send JSON, not FormData
+        },
+        body: JSON.stringify({ 
+          fileName: file.name, 
+          fileType: file.type 
+        }),
       });
 
-      const { uploadUrl, fileUrl } = await res.json();
+      if (!presignRes.ok) throw new Error('Failed to get upload URL');
+      const { url } = await presignRes.json(); // This is the long URL with tokens
 
-      // 2. Upload the file directly to AWS S3
-      const upload = await fetch(uploadUrl, {
+      // ---------------------------------------------------------
+      // STEP 2: Upload the actual file directly to S3
+      // ---------------------------------------------------------
+      const uploadRes = await fetch(url, {
         method: 'PUT',
-        headers: { 'Content-Type': file.type },
-        body: file,
+        headers: {
+          'Content-Type': file.type, // <--- IMPORTANT: Must match what you sent in Step 1
+        },
+        body: file, // <--- Send the raw File object here
       });
 
-      if (!upload.ok) throw new Error('Upload to S3 failed');
+      if (!uploadRes.ok) throw new Error('S3 direct upload failed');
 
-      // 3. Save the *file URL* to your state (instead of just the name)
+      
+      const cleanUrl = url.split('?')[0]; 
+
       if (isNewColumn) {
-        setNewCol(prev => ({ ...prev, [field]: fileUrl }));
+        setNewCol(prev => ({ ...prev, [field]: cleanUrl }));
       } else {
-        setEditForm(prev => ({ ...prev, [field]: fileUrl }));
+        setEditForm(prev => ({ ...prev, [field]: cleanUrl }));
       }
 
     } catch (error) {
       console.error(error);
-      alert('File upload failed. Please try again.');
+      alert('Upload failed.');
+      // Revert state on error
+      if (isNewColumn) {
+        setNewCol(prev => ({ ...prev, [field]: originalLabel }));
+      } else {
+        setEditForm(prev => ({ ...prev, [field]: originalLabel }));
+      }
     }
   };
-
   const handleAddColumn = async () => {
     if (!newCol.name) return alert("Please enter a product name");
     
