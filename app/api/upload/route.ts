@@ -1,46 +1,71 @@
 import { NextRequest, NextResponse } from "next/server";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { v4 as uuidv4 } from "uuid";
+import { compressImage } from "@/lib/image-compresser";
 
 // 1. Initialize the S3 Client
 const s3Client = new S3Client({
-  region: process.env.AWS_REGION,
+  region: process.env.AWS_REGION || "ap-south-1",
   credentials: {
     accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
   },
 });
 
+const BUCKET_NAME = process.env.AWS_S3_BUCKET_NAME!;
+
+async function uploadToS3(
+  buffer: Buffer,
+  fileName: string,
+  contentType: string,
+): Promise<string> {
+  const fileExtension = fileName.split(".").pop()?.toLowerCase() || "jpg";
+  const uniqueFileName = `${uuidv4()}.${fileExtension}`;
+  const key = `supplier/products/${uniqueFileName}`;
+
+  const processed = await compressImage(buffer);
+
+  const uploadParams = {
+    Bucket: BUCKET_NAME,
+    Key: key,
+    Body: processed.buffer,
+    ContentType: processed.contentType,
+    CacheControl: "max-age=31536000",
+    Metadata: {
+      originalName: fileName,
+      uploadedAt: new Date().toISOString(),
+    },
+  };
+
+  const command = new PutObjectCommand(uploadParams);
+  await s3Client.send(command);
+
+  return `https://${BUCKET_NAME}.s3.${process.env.AWS_REGION || "ap-south-1"}.amazonaws.com/${key}`;
+}
+
 export async function POST(request: NextRequest) {
   try {
-    // 2. Parse the incoming request for file metadata
-    const { fileName, fileType } = await request.json();
+    // Parse FormData instead of JSON
+    const formData = await request.formData();
+    const file = formData.get("file") as File;
 
-    if (!fileName || !fileType) {
-      return NextResponse.json(
-        { error: "File name and type are required." },
-        { status: 400 }
-      );
+    if (!file) {
+      return NextResponse.json({ error: "File is required." }, { status: 400 });
     }
 
-    // 3. Define the S3 parameters
-    const command = new PutObjectCommand({
-      Bucket: process.env.AWS_S3_BUCKET_NAME,
-      Key: fileName,
-      ContentType: fileType,
-    });
+    // Convert File to Buffer
+    const bytes = await file.arrayBuffer();
+    const buffer = Buffer.from(bytes);
 
-    // 4. Generate the Presigned URL (valid for 5 minutes)
-    const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
+    // Upload to S3
+    const url = await uploadToS3(buffer, file.name, file.type);
 
-    // 5. Return the URL to the frontend
-    return NextResponse.json({ url: signedUrl });
-    
+    return NextResponse.json({ url });
   } catch (error) {
-    console.error("S3 Presigning Error:", error);
+    console.error("S3 Upload Error:", error);
     return NextResponse.json(
-      { error: "Failed to create upload URL." },
-      { status: 500 }
+      { error: "Failed to upload file." },
+      { status: 500 },
     );
   }
 }
