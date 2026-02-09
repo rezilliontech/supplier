@@ -3,727 +3,519 @@
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Sun,
-  LogOut,
-  Package,
-  Plus,
-  Trash2,
-  X,
-  Edit2,
-  ArrowLeft,
-  ArrowRight,
-  MapPin,
-  Save,
-  FileText,
-  UploadCloud,
+  Sun, LogOut, Package, Plus, Trash2, X, Edit2, ArrowLeft, ArrowRight,
+  MapPin, Save, FileText, UploadCloud, Layers, Zap, Calendar, FileCode, 
+  LayoutTemplate, DollarSign, Settings2
 } from "lucide-react";
-import { ProductData, RowDefinition, DashboardResponse } from "@/types"; // Import types
+import { ProductData, RowDefinition, DashboardResponse } from "@/types";
 
-// Helper type for the user object
+// --- TYPES ---
+interface LocationEntry {
+  state: string;
+  city: string;
+  price: number;
+}
+
+interface ExtendedProductData extends ProductData {
+  id: number;
+  name: string;
+  supplier?: string;
+  category?: "module" | "inverter";
+  technology?: string;
+  type?: string;
+  power_kw?: number;
+  min_order?: string;
+  qty_mw?: number;
+  price_ex_factory?: number;
+  price_ex_10mw?: number;
+  validity?: string; // Date string
+  datasheet?: string;
+  panfile?: string;
+  ondfile?: string;
+  locations?: LocationEntry[]; 
+  [key: string]: unknown; // Allows custom fields
+}
+
+interface RowDef {
+  id: string;
+  label: string;
+  type: "text" | "number" | "date" | "file" | "select";
+  options?: string[];
+  category: "module" | "inverter";
+  isCustom?: boolean; // Flag for custom added fields
+}
+
 interface User {
   id: string | number;
   companyName: string;
 }
 
+// --- CONSTANTS ---
+const INDIAN_STATES = [
+  'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chhattisgarh', 'Goa', 'Gujarat', 
+  'Haryana', 'Himachal Pradesh', 'Jharkhand', 'Karnataka', 'Kerala', 'Madhya Pradesh', 
+  'Maharashtra', 'Manipur', 'Meghalaya', 'Mizoram', 'Nagaland', 'Odisha', 'Punjab', 
+  'Rajasthan', 'Sikkim', 'Tamil Nadu', 'Telangana', 'Tripura', 'Uttar Pradesh', 
+  'Uttarakhand', 'West Bengal', 'Delhi', 'Jammu & Kashmir', 'Ladakh', 'Puducherry'
+];
+
+// REMOVED 'availability'. 'validity' is explicitly type: "date".
+const MODULE_FIELDS: RowDef[] = [
+  { id: "type", label: "Module Type", type: "select", options: ["p-Type", "n-Type"], category: "module" },
+  { id: "technology", label: "Technology", type: "select", options: ["Monocrystalline", "Polycrystalline", "Bifacial", "Thin Film", "TopCon", "HJT"], category: "module" },
+  { id: "power_kw", label: "Power (Wp)", type: "number", category: "module" },
+  { id: "min_order", label: "Min Order (MWp/KWp)", type: "text", category: "module" },
+  { id: "qty_mw", label: "Qty (MW)", type: "number", category: "module" },
+  { id: "validity", label: "Price Validity", type: "date", category: "module" }, // Date Picker
+  { id: "datasheet", label: "Datasheet (PDF)", type: "file", category: "module" },
+  { id: "panfile", label: "PAN File (.pan)", type: "file", category: "module" },
+];
+
+const INVERTER_FIELDS: RowDef[] = [
+  { id: "technology", label: "Technology", type: "text", category: "inverter" },
+  { id: "power_kw", label: "Power (kW)", type: "number", category: "inverter" },
+  { id: "min_order", label: "Min Order Qty", type: "text", category: "inverter" },
+  { id: "qty_mw", label: "Qty (MW)", type: "number", category: "inverter" },
+  { id: "validity", label: "Price Validity", type: "date", category: "inverter" }, // Date Picker
+  { id: "price_ex_10mw", label: "Price Ex-Factory (10 MWp)", type: "number", category: "inverter" },
+  { id: "datasheet", label: "Datasheet (PDF)", type: "file", category: "inverter" },
+  { id: "ondfile", label: "OND File (.ond)", type: "file", category: "inverter" },
+];
+
 export default function DashboardPage() {
   const router = useRouter();
 
-  // --- STATE WITH TYPES ---
+  // --- STATE ---
   const [user, setUser] = useState<User | null>(null);
-  const [localProducts, setLocalProducts] = useState<ProductData[]>([]);
-  const [rows, setRows] = useState<RowDefinition[]>([]);
-  const [locations, setLocations] = useState<string[]>([]);
-
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [editForm, setEditForm] = useState<Partial<ProductData>>({});
-  const [newCol, setNewCol] = useState<Partial<ProductData>>({});
-
+  const [activeTab, setActiveTab] = useState<"module" | "inverter">("module");
+  const [products, setProducts] = useState<ExtendedProductData[]>([]);
   const [loading, setLoading] = useState(true);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // --- API HELPER (Fixed 'any' types) ---
+  // Form State
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [formData, setFormData] = useState<Partial<ExtendedProductData>>({});
+  const [locInput, setLocInput] = useState<{state: string, city: string, price: string}>({ state: "", city: "", price: "" });
+  const [locations, setLocations] = useState<LocationEntry[]>([]);
+  
+  // Custom Fields State
+  const [customFields, setCustomFields] = useState<RowDef[]>([]);
+
+  // --- API HELPER ---
   const apiCall = async (action: string, data: Record<string, unknown>) => {
     try {
-      // 1. Get the current user from LocalStorage
       const storedUser = localStorage.getItem("currentUser");
-      if (!storedUser) {
-        alert("You are not logged in.");
-        return null;
-      }
-
+      if (!storedUser) return null;
       const parsedUser = JSON.parse(storedUser);
+      const requestData = { ...data, supplierId: parsedUser.id };
 
-      // 2. Add supplierId to the payload
-      const requestData = {
-        ...data,
-        supplierId: parsedUser.id,
-      };
-
-      // 3. Send to Backend
       const res = await fetch("/api/supplierdashboard", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, data: requestData }),
       });
-
-      const result = await res.json();
-      if (!res.ok) throw new Error(result.error || "API Action Failed");
-
-      return result;
-    } catch (err: unknown) {
+      return await res.json();
+    } catch (err) {
       console.error(err);
-      // Safe error handling for TypeScript
-      const message =
-        err instanceof Error ? err.message : "An unknown error occurred";
-      alert(`Error: ${message}`);
       return null;
     }
   };
 
-  // --- 1. INITIAL LOAD ---
+  // --- LOAD DATA ---
   useEffect(() => {
     const init = async () => {
-      // 1. Auth Check & Get User ID
       const storedUser = localStorage.getItem("currentUser");
-      if (!storedUser) {
-        router.push("/");
-        return;
-      }
+      if (!storedUser) { router.push("/"); return; }
+      setUser(JSON.parse(storedUser));
 
-      const parsedUser: User = JSON.parse(storedUser);
-      setUser(parsedUser);
-
-      // 2. Fetch Data
       try {
-        const res = await fetch(
-          `/api/supplierdashboard?supplierId=${parsedUser.id}`,
-        );
+        const res = await fetch(`/api/supplierdashboard?supplierId=${JSON.parse(storedUser).id}`);
+        const data = await res.json();
+        const cleanProducts = (data.products || []).map((p: ExtendedProductData) => ({
+            ...p,
+            category: p.category || "module",
+            locations: p.locations || [] 
+        }));
+        setProducts(cleanProducts);
+        
+        // Detect existing custom fields from data
+        const standardIds = new Set([...MODULE_FIELDS, ...INVERTER_FIELDS].map(f => f.id));
+        const detectedFields: RowDef[] = [];
+        const seenKeys = new Set<string>();
 
-        if (!res.ok) throw new Error("Failed to fetch dashboard");
+        cleanProducts.forEach((p: ExtendedProductData) => {
+            Object.keys(p).forEach(key => {
+                if (!standardIds.has(key) && !['id', 'name', 'supplier', 'supplier_id', 'category', 'created_at', 'updated_at', 'locations', 'price_ex_factory', 'attributes'].includes(key)) {
+                    if (!seenKeys.has(key)) {
+                        seenKeys.add(key);
+                        const label = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                        detectedFields.push({
+                            id: key,
+                            label: label,
+                            type: 'text',
+                            category: p.category || 'module',
+                            isCustom: true
+                        });
+                    }
+                }
+            });
+        });
+        setCustomFields(detectedFields);
 
-        const data: DashboardResponse = await res.json();
-        setLocalProducts(data.products || []);
-        setRows(data.rows || []);
-        setLocations(data.locations || []);
-      } catch (e) {
-        console.error("Failed to load dashboard data", e);
-        setErrorMsg("Could not load dashboard data. Please refresh.");
-      } finally {
-        setLoading(false);
-      }
+      } catch (e) { console.error(e); } finally { setLoading(false); }
     };
     init();
   }, [router]);
 
-  const handleLogout = () => {
-    localStorage.removeItem("currentUser");
-    router.push("/");
-  };
+  const handleLogout = () => { localStorage.removeItem("currentUser"); router.push("/"); };
 
-  // --- HANDLERS ---
+  // --- CUSTOM FIELD HANDLERS ---
 
-  const moveProduct = (index: number, direction: "left" | "right") => {
-    const newItems = [...localProducts];
-    if (direction === "left" && index > 0) {
-      [newItems[index - 1], newItems[index]] = [
-        newItems[index],
-        newItems[index - 1],
-      ];
-    } else if (direction === "right" && index < newItems.length - 1) {
-      [newItems[index + 1], newItems[index]] = [
-        newItems[index],
-        newItems[index + 1],
-      ];
-    }
-    setLocalProducts(newItems);
-  };
-
-  const handleAddLocation = async () => {
-    const city = prompt("Enter City Name (e.g., Mumbai, Delhi):");
-    if (city && !locations.includes(city)) {
-      const updatedLocs = [...locations, city];
-
-      // Optimistic UI Update
-      setLocations(updatedLocs);
-
-      // API Sync
-      const success = await apiCall("update_settings", {
-        key: "locations",
-        value: updatedLocs,
-      });
-      if (!success) setLocations(locations); // Revert on failure
-    }
-  };
-
-  const handleAddRow = async () => {
-    const label = prompt("Enter Parameter Name (e.g., Warranty, Frame Color):");
+  const handleAddCustomField = () => {
+    const label = prompt("Enter Name for new field (e.g. Frame Color, Cable Length):");
     if (!label) return;
-
-    const id = label.toLowerCase().replace(/\s+/g, "_") + "_" + Date.now();
-    const newRow: RowDefinition = { id, label, type: "text", isFixed: false };
-
-    const updatedRows = [...rows, newRow];
-    setRows(updatedRows);
-
-    const success = await apiCall("update_settings", {
-      key: "rows",
-      value: updatedRows,
-    });
-    if (!success) setRows(rows); // Revert
-  };
-
-  const handleDeleteRow = async (rowId: string) => {
-    if (
-      window.confirm(
-        "Delete this parameter row? Data in this row will be hidden.",
-      )
-    ) {
-      const oldRows = [...rows];
-      const updatedRows = rows.filter((r) => r.id !== rowId);
-      setRows(updatedRows);
-
-      const success = await apiCall("update_settings", {
-        key: "rows",
-        value: updatedRows,
-      });
-      if (!success) setRows(oldRows); // Revert
+    const id = label.toLowerCase().replace(/\s+/g, '_');
+    
+    // Prevent duplicate keys
+    if (customFields.some(f => f.id === id) || [...MODULE_FIELDS, ...INVERTER_FIELDS].some(f => f.id === id)) {
+        alert("Field already exists!");
+        return;
     }
+
+    setCustomFields([...customFields, {
+        id,
+        label,
+        type: 'text',
+        category: activeTab,
+        isCustom: true
+    }]);
   };
 
-  const startEditing = (p: ProductData) => {
-    setEditingId(p.id);
-    setEditForm({ ...p });
+  const handleDeleteCustomField = (fieldId: string) => {
+      if(window.confirm("Remove this custom field from view?")) {
+          setCustomFields(customFields.filter(f => f.id !== fieldId));
+      }
   };
 
-  const saveEditing = async () => {
-    if (!editForm.id) return;
+  // --- PRODUCT FORM HANDLERS ---
 
-    // Optimistic Update
-    const oldProducts = [...localProducts];
-    setLocalProducts(
-      localProducts.map((p) =>
-        p.id === editForm.id ? (editForm as ProductData) : p,
-      ),
-    );
+  const startEditing = (product: ExtendedProductData) => {
+    setEditingId(product.id as number);
+    setFormData({ ...product }); // Copy data
+    setLocations(product.locations || []); // Copy locations
+  };
+
+  const cancelEditing = () => {
     setEditingId(null);
-
-    // API Call (Cast editForm to Record<string, unknown> for strict typing)
-    const success = await apiCall(
-      "update_product",
-      editForm as Record<string, unknown>,
-    );
-    if (!success) setLocalProducts(oldProducts); // Revert
+    setFormData({});
+    setLocations([]);
+    setLocInput({ state: "", city: "", price: "" });
   };
 
-  const handleEditChange = (field: string, value: string | number) => {
-    setEditForm((prev) => ({ ...prev, [field]: value }));
-  };
-
-  // ... inside DashboardPage component
-
-  const handleFileChange = async (
-    field: string,
-    file: File | undefined,
-    isNewColumn = false,
-  ) => {
+  const handleFileChange = async (field: string, file: File | undefined) => {
     if (!file) return;
-
-    // 1. Set temporary loading state
-    const originalLabel = isNewColumn ? newCol[field] : editForm[field];
-    const loadingText = "Uploading...";
-
-    if (isNewColumn) {
-      setNewCol((prev) => ({ ...prev, [field]: loadingText }));
-    } else {
-      setEditForm((prev) => ({ ...prev, [field]: loadingText }));
-    }
-
+    setFormData(prev => ({ ...prev, [field]: "Uploading..." }));
     try {
-      // ---------------------------------------------------------
-      // STEP 1: Upload file using FormData
-      // ---------------------------------------------------------
       const formData = new FormData();
       formData.append("file", file);
-
-      const uploadRes = await fetch("/api/upload", {
-        method: "POST",
-        body: formData, // Send as FormData, not JSON
-      });
-
-      if (!uploadRes.ok) throw new Error("Upload failed");
-
-      const { url } = await uploadRes.json();
-
-      // Update state with the returned URL
-      if (isNewColumn) {
-        setNewCol((prev) => ({ ...prev, [field]: url }));
-      } else {
-        setEditForm((prev) => ({ ...prev, [field]: url }));
-      }
-    } catch (error) {
-      console.error(error);
+      const res = await fetch("/api/upload", { method: "POST", body: formData });
+      const { url } = await res.json();
+      setFormData(prev => ({ ...prev, [field]: url }));
+    } catch {
       alert("Upload failed.");
-      // Revert state on error
-      if (isNewColumn) {
-        setNewCol((prev) => ({ ...prev, [field]: originalLabel }));
-      } else {
-        setEditForm((prev) => ({ ...prev, [field]: originalLabel }));
-      }
+      setFormData(prev => ({ ...prev, [field]: "" }));
     }
   };
-  const handleAddColumn = async () => {
-    if (!newCol.name) return alert("Please enter a product name");
 
-    const newProduct: Partial<ProductData> = {
-      ...newCol,
+  const addLocation = () => {
+    if (!locInput.state || !locInput.city || !locInput.price) return alert("Fill all location fields");
+    setLocations([...locations, { 
+      state: locInput.state, city: locInput.city, price: Number(locInput.price) 
+    }]);
+    setLocInput({ state: "", city: "", price: "" });
+  };
+
+  const removeLocation = (index: number) => {
+    setLocations(locations.filter((_, i) => i !== index));
+  };
+
+  const handleSaveProduct = async () => {
+    if (!formData.name) return alert("Product Name is required");
+    
+    const payload = {
+      ...formData,
       supplier: user?.companyName || "My Company",
+      category: activeTab,
+      locations: locations 
     };
 
-    const res = await apiCall(
-      "create_product",
-      newProduct as Record<string, unknown>,
-    );
-
-    if (res && res.success) {
-      // Add the returned ID to the local state
-      const completeProduct = { ...newProduct, id: res.newId } as ProductData;
-      setLocalProducts([...localProducts, completeProduct]);
-      setNewCol({});
+    const action = editingId ? "update_product" : "create_product";
+    const res = await apiCall(action, payload);
+    
+    if (res?.success) {
+      if (editingId) {
+        setProducts(products.map(p => p.id === editingId ? { ...payload, id: editingId } as ExtendedProductData : p));
+      } else {
+        setProducts([...products, { ...payload, id: res.newId } as ExtendedProductData]);
+      }
+      cancelEditing(); 
     }
   };
 
   const handleDelete = async (id: number) => {
-    if (window.confirm("Delete this product?")) {
-      const oldProducts = [...localProducts];
-      setLocalProducts(localProducts.filter((p) => p.id !== id));
-
-      const success = await apiCall("delete_product", { id });
-      if (!success) setLocalProducts(oldProducts); // Revert
+    if (window.confirm("Delete product?")) {
+      setProducts(products.filter(p => p.id !== id));
+      await apiCall("delete_product", { id });
+      if (editingId === id) cancelEditing();
     }
   };
 
-  if (loading)
-    return (
-      <div className="h-screen w-full flex items-center justify-center bg-slate-50 text-slate-400">
-        Loading Dashboard...
-      </div>
-    );
-  if (errorMsg)
-    return (
-      <div className="h-screen w-full flex flex-col items-center justify-center bg-red-50 text-red-500">
-        Error: {errorMsg}{" "}
-        <button
-          onClick={() => window.location.reload()}
-          className="mt-4 px-4 py-2 bg-red-600 text-white rounded"
-        >
-          Retry
-        </button>
-      </div>
-    );
+  const moveProduct = (index: number, direction: "left" | "right") => {
+    const newItems = [...products];
+    if (direction === "left" && index > 0) {
+      [newItems[index - 1], newItems[index]] = [newItems[index], newItems[index - 1]];
+    } else if (direction === "right" && index < newItems.length - 1) {
+      [newItems[index + 1], newItems[index]] = [newItems[index], newItems[index + 1]];
+    }
+    setProducts(newItems);
+  };
+
+  // --- RENDER HELPERS ---
+  const filteredProducts = products.filter(p => p.category === activeTab);
+  
+  // MERGE Standard Fields + Custom Fields for current tab
+  const activeFields = [
+      ...(activeTab === 'module' ? MODULE_FIELDS : INVERTER_FIELDS),
+      ...customFields.filter(f => f.category === activeTab)
+  ];
+
+  if (loading) return <div className="h-screen w-full flex items-center justify-center bg-slate-50 text-slate-400">Loading...</div>;
 
   return (
     <div className="w-full h-screen bg-slate-50 flex flex-col font-sans text-slate-800 overflow-hidden">
-      {/* --- HEADER --- */}
+      
+      {/* HEADER */}
       <header className="bg-slate-900 text-white p-3 px-6 flex justify-between items-center shadow-lg z-50 shrink-0 h-16 relative">
         <div className="flex items-center gap-3">
           <div className="p-1.5 bg-orange-500 rounded-lg shadow-[0_0_15px_rgba(249,115,22,0.4)]">
             <Sun size={18} className="text-white" />
           </div>
           <div>
-            {/* NAME CHANGED HERE */}
-            <h1 className="font-bold text-base tracking-tight leading-none">
-              Rezillion Supplier
-            </h1>
-            <p className="text-[10px] text-slate-400 font-medium tracking-wide">
-              SUPPLIER DASHBOARD • {user?.companyName || "Guest"}
-            </p>
+            <h1 className="font-bold text-base">Rezillion Supplier</h1>
+            <p className="text-[10px] text-slate-400">DASHBOARD • {user?.companyName || "Guest"}</p>
+          </div>
+          <div className="ml-10 flex bg-slate-800 p-1 rounded-lg border border-slate-700">
+             <button onClick={() => { setActiveTab("module"); cancelEditing(); }} className={`flex items-center gap-2 px-4 py-1.5 rounded-md text-xs font-bold transition-all ${activeTab === 'module' ? 'bg-orange-500 text-white' : 'text-slate-400 hover:text-white'}`}>
+                <Layers size={14} /> Modules
+             </button>
+             <button onClick={() => { setActiveTab("inverter"); cancelEditing(); }} className={`flex items-center gap-2 px-4 py-1.5 rounded-md text-xs font-bold transition-all ${activeTab === 'inverter' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}>
+                <Zap size={14} /> Inverters
+             </button>
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <div className="hidden md:flex items-center gap-2 px-3 py-1 bg-white/5 rounded-full border border-white/10">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span className="text-[10px] font-medium text-slate-300 uppercase tracking-wider">
-              Live Sync
-            </span>
-          </div>
-          <button
-            onClick={handleLogout}
-            className="text-slate-400 hover:text-white hover:bg-white/10 p-2 rounded-lg transition-all"
-            title="Sign Out"
-          >
-            <LogOut size={18} />
-          </button>
-        </div>
+        <button onClick={handleLogout} className="text-slate-400 hover:text-white"><LogOut size={18} /></button>
       </header>
 
-      {/* --- MAIN WORKSPACE --- */}
+      {/* WORKSPACE */}
       <div className="flex-1 overflow-auto bg-slate-100/50 relative">
-        <div className="flex min-w-max">
-          {/* === 1. FIXED LEFT COLUMN (LABELS) === */}
-          <div className="w-[280px] flex-shrink-0 bg-white border-r border-slate-200 shadow-[4px_0_20px_rgba(0,0,0,0.02)] z-40 sticky left-0 flex flex-col">
-            <div className="h-[120px] p-5 border-b border-slate-200 bg-slate-50 flex flex-col justify-between shrink-0 sticky top-0 z-50 shadow-sm">
-              <div className="flex items-center gap-2 text-slate-400">
+        <div className="flex min-w-max h-full">
+          
+          {/* --- LEFT COLUMN (LABELS) --- */}
+          <div className="w-[260px] flex-shrink-0 bg-white border-r border-slate-200 shadow-sm z-40 sticky left-0 flex flex-col h-full">
+            <div className={`h-[120px] p-5 border-b border-slate-200 flex flex-col justify-center shrink-0 ${activeTab === 'inverter' ? 'bg-blue-50' : 'bg-orange-50'}`}>
+              <div className="flex items-center gap-2 text-slate-400 mb-1">
                 <Package size={14} />
-                <span className="text-[10px] font-bold uppercase tracking-widest">
-                  Inventory
-                </span>
+                <span className="text-[10px] font-bold uppercase tracking-widest">{activeTab === 'inverter' ? 'Inverter Specs' : 'Module Specs'}</span>
               </div>
-              <div>
-                <h2 className="text-xl font-bold text-slate-800">Parameters</h2>
-                <p className="text-xs text-slate-400 mt-1">
-                  Define specs & pricing
-                </p>
-              </div>
+              <h2 className={`text-xl font-bold ${activeTab === 'inverter' ? 'text-blue-900' : 'text-orange-900'}`}>Parameters</h2>
             </div>
 
-            <div className="bg-white">
-              <div className="h-12 px-5 border-b border-slate-100 flex items-center text-sm font-semibold text-slate-700 bg-white">
-                Product Name
+            <div className="bg-white flex-1 overflow-y-auto">
+              <div className="h-12 px-5 border-b border-slate-100 flex items-center text-sm font-semibold text-slate-700 bg-slate-50">Product Name</div>
+              
+              <div className="h-12 px-5 border-b border-slate-100 flex items-center text-xs font-bold text-slate-700 bg-yellow-50/50">
+                 {activeTab === 'module' ? 'Price Ex-Factory (Rs/Wp)' : 'Price Ex-Factory (Rs/W)'}
               </div>
 
-              {rows.map((row, i) => (
-                <div
-                  key={row.id}
-                  className={`h-12 px-5 border-b border-slate-100 flex items-center justify-between text-xs font-medium text-slate-500 hover:bg-slate-50 transition-colors ${i % 2 === 0 ? "bg-slate-[5px]" : ""}`}
-                >
-                  <span>{row.label}</span>
-                  {!row.isFixed && (
-                    <button
-                      onClick={() => handleDeleteRow(row.id)}
-                      className="text-slate-300 hover:text-red-500 transition-colors p-1"
-                    >
-                      <Trash2 size={12} />
-                    </button>
+              {activeFields.map((row) => (
+                <div key={row.id} className="h-12 px-5 border-b border-slate-100 flex items-center justify-between text-xs font-medium text-slate-500 hover:bg-slate-50 group">
+                  <div className="flex items-center gap-2">
+                     {row.type === 'select' && <LayoutTemplate size={12} className="text-purple-400"/>}
+                     {row.type === 'file' && <FileText size={12} className="text-blue-400"/>}
+                     {row.type === 'date' && <Calendar size={12} className="text-green-500"/>}
+                     {row.type === 'number' && <DollarSign size={12} className="text-orange-400"/>}
+                     <span>{row.label}</span>
+                  </div>
+                  {/* Delete Button for Custom Fields */}
+                  {row.isCustom && (
+                      <button onClick={() => handleDeleteCustomField(row.id)} className="opacity-0 group-hover:opacity-100 text-slate-300 hover:text-red-500 transition-opacity">
+                          <Trash2 size={12}/>
+                      </button>
                   )}
                 </div>
               ))}
 
-              <div className="px-5 py-2 border-b border-slate-100 bg-slate-50/50">
-                <button
-                  onClick={handleAddRow}
-                  className="w-full py-1.5 border border-dashed border-slate-300 text-slate-500 text-[10px] font-bold rounded hover:bg-white hover:border-blue-300 hover:text-blue-600 flex items-center justify-center gap-1 transition-all"
-                >
-                  <Plus size={10} /> Add Param
-                </button>
+              {/* Add Custom Field Button */}
+              <div className="p-3 border-b border-slate-100">
+                  <button onClick={handleAddCustomField} className="w-full py-2 border border-dashed border-slate-300 text-slate-500 hover:text-blue-600 hover:border-blue-400 text-[10px] font-bold rounded flex items-center justify-center gap-1 transition-colors">
+                      <Plus size={12}/> Add Attribute
+                  </button>
               </div>
 
-              <div className="px-5 py-3 bg-orange-50/50 border-b border-orange-100 flex flex-col gap-1 mt-0">
-                <span className="text-[10px] font-bold text-orange-700 uppercase tracking-wider flex items-center gap-1">
-                  <MapPin size={10} /> Location Pricing
+              <div className="h-40 px-5 border-b border-slate-100 flex flex-col justify-center gap-1 bg-slate-50/30">
+                <span className={`text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 ${activeTab === 'inverter' ? 'text-blue-700' : 'text-orange-700'}`}>
+                  <MapPin size={10} /> Price Location Wise
                 </span>
-              </div>
-
-              {locations.map((city) => (
-                <div
-                  key={city}
-                  className="h-12 px-5 border-b border-orange-100 flex items-center justify-between text-xs font-medium text-slate-600 bg-orange-50/10 group"
-                >
-                  <span>Price at {city}</span>
-                </div>
-              ))}
-
-              <div className="p-4">
-                <button
-                  onClick={handleAddLocation}
-                  className="w-full py-2 border border-dashed border-orange-300 text-orange-600 text-xs font-bold rounded hover:bg-orange-50 flex items-center justify-center gap-2 transition-colors"
-                >
-                  <Plus size={12} /> Add City
-                </button>
+                <p className="text-[9px] text-slate-400">Inventory and specific pricing by city.</p>
               </div>
             </div>
           </div>
 
-          {/* === 2. DATA COLUMNS === */}
-          {localProducts.map((product, index) => {
-            const isEditing = editingId === product.id;
-            const data = isEditing ? editForm : product;
-
-            return (
-              <div
-                key={product.id}
-                className={`w-[220px] flex-shrink-0 border-r border-slate-200 flex flex-col transition-all duration-300 ${isEditing ? "bg-white shadow-xl ring-2 ring-blue-500 z-30 scale-[1.005]" : "bg-white hover:bg-slate-50"}`}
-              >
-                <div
-                  className={`h-[120px] p-3 border-b border-slate-200 flex flex-col justify-between shrink-0 sticky top-0 z-30 shadow-sm ${isEditing ? "bg-blue-50" : "bg-white"}`}
-                >
+          {/* --- MIDDLE: PRODUCT COLUMNS --- */}
+          {filteredProducts.map((product, index) => (
+            <div key={product.id} className={`w-[220px] flex-shrink-0 border-r border-slate-200 flex flex-col transition-colors ${editingId === product.id ? 'bg-blue-50 ring-2 ring-inset ring-blue-500 z-10' : 'bg-white hover:bg-slate-50'}`}>
+                
+                {/* Product Header */}
+                <div className="h-[120px] p-3 border-b border-slate-200 flex flex-col justify-between shrink-0">
                   <div className="flex justify-between items-center opacity-40 hover:opacity-100 transition-opacity">
-                    <button
-                      onClick={() => moveProduct(index, "left")}
-                      disabled={index === 0}
-                      className="hover:text-blue-600 disabled:opacity-0 p-1 hover:bg-blue-50 rounded"
-                    >
-                      <ArrowLeft size={12} />
-                    </button>
-                    <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-                      Product {index + 1}
-                    </span>
-                    <button
-                      onClick={() => moveProduct(index, "right")}
-                      disabled={index === localProducts.length - 1}
-                      className="hover:text-blue-600 disabled:opacity-0 p-1 hover:bg-blue-50 rounded"
-                    >
-                      <ArrowRight size={12} />
-                    </button>
+                    <button onClick={() => moveProduct(index, "left")} disabled={index === 0} className="hover:text-blue-600 disabled:opacity-0 p-1"><ArrowLeft size={12} /></button>
+                    <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">#{index + 1}</span>
+                    <button onClick={() => moveProduct(index, "right")} disabled={index === filteredProducts.length - 1} className="hover:text-blue-600 disabled:opacity-0 p-1"><ArrowRight size={12} /></button>
                   </div>
-
                   <div className="text-center px-1">
-                    <div
-                      className="text-sm font-bold text-slate-800 truncate"
-                      title={String(data.name)}
-                    >
-                      {String(data.name)}
-                    </div>
-                    <div className="text-[10px] text-slate-400 mt-0.5">
-                      {String(data.technology || "N/A")}
-                    </div>
+                    <div className="text-sm font-bold text-slate-800 truncate" title={String(product.name)}>{String(product.name)}</div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">{String(product.technology || "N/A")}</div>
                   </div>
-
                   <div className="flex justify-center gap-2 pt-1">
-                    {isEditing ? (
-                      <>
-                        <button
-                          onClick={saveEditing}
-                          className="px-3 py-1 bg-blue-600 text-white text-[10px] font-bold rounded shadow-sm hover:bg-blue-700 flex items-center gap-1"
-                        >
-                          <Save size={10} /> Save
-                        </button>
-                        <button
-                          onClick={() => setEditingId(null)}
-                          className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded"
-                        >
-                          <X size={14} />
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          onClick={() => startEditing(product)}
-                          className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium text-slate-500 bg-slate-100 hover:bg-blue-50 hover:text-blue-600 rounded border border-slate-200 transition-colors"
-                        >
-                          <Edit2 size={10} /> Edit
-                        </button>
-                        <button
-                          onClick={() => handleDelete(product.id)}
-                          className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium text-slate-500 bg-slate-100 hover:bg-blue-50 hover:text-red-600 rounded border border-slate-200 transition-colors"
-                          title="Delete"
-                        >
-                          <Trash2 size={12} />
-                          Delete
-                        </button>
-                      </>
-                    )}
+                    <button onClick={() => startEditing(product)} className={`flex items-center gap-1 px-2 py-1 text-[9px] font-bold rounded border ${editingId === product.id ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-slate-500 border-slate-200 hover:text-blue-600'}`}>
+                        <Edit2 size={10} /> {editingId === product.id ? 'Editing' : 'Edit'}
+                    </button>
+                    <button onClick={() => handleDelete(product.id as number)} className="text-slate-400 hover:text-red-600 transition-colors"><Trash2 size={12} /></button>
                   </div>
                 </div>
 
-                <div>
+                {/* Product Rows */}
+                <div className="flex-1 overflow-y-auto">
                   <div className="h-12 p-2 border-b border-slate-100 flex items-center justify-center bg-slate-50/20">
-                    {isEditing ? (
-                      <input
-                        className="w-full text-center text-xs font-bold bg-white border border-blue-200 rounded px-2 py-1 focus:ring-2 focus:ring-blue-100 outline-none"
-                        value={String(data.name || "")}
-                        onChange={(e) =>
-                          handleEditChange("name", e.target.value)
-                        }
-                      />
-                    ) : (
-                      <span className="text-xs font-bold text-slate-700">
-                        {String(data.name || "")}
-                      </span>
-                    )}
+                    <span className="text-xs font-bold text-slate-700 truncate">{String(product.name || "")}</span>
+                  </div>
+                  <div className="h-12 p-2 border-b border-slate-100 flex items-center justify-center bg-yellow-50/10">
+                    <span className="text-xs font-bold text-slate-800">₹{String(product.price_ex_factory || "0")}</span>
                   </div>
 
-                  {rows.map((row) => (
-                    <div
-                      key={row.id}
-                      className="h-12 px-2 border-b border-slate-100 flex items-center justify-center text-xs text-slate-600 text-center relative group-cell"
-                    >
-                      {isEditing ? (
-                        // --- EDIT MODE ---
-                        row.type === "select" ? (
-                          <select
-                            className="w-full text-center text-xs p-1 bg-white border border-blue-200 rounded focus:ring-2 focus:ring-blue-100 outline-none"
-                            value={String(data[row.id] || "")}
-                            onChange={(e) =>
-                              handleEditChange(row.id, e.target.value)
-                            }
-                          >
-                            {(row.options || []).map((o: string) => (
-                              <option key={o} value={o}>
-                                {o}
-                              </option>
-                            ))}
-                          </select>
-                        ) : row.type === "file" ? (
-                          <div className="w-full relative group">
-                            <label className="w-full cursor-pointer flex items-center justify-center gap-1 text-[9px] bg-blue-50 text-blue-600 px-2 py-1.5 rounded border border-blue-100 hover:bg-blue-100 transition-colors">
-                              <UploadCloud size={10} />
-                              <span className="truncate max-w-[80px]">
-                                {String(data[row.id] || "Upload")}
-                              </span>
-                              <input
-                                type="file"
-                                className="hidden"
-                                onChange={(e) =>
-                                  handleFileChange(row.id, e.target.files?.[0])
-                                }
-                              />
-                            </label>
-                          </div>
-                        ) : (
-                          <input
-                            type={
-                              row.type === "number"
-                                ? "number"
-                                : row.type === "date"
-                                  ? "date"
-                                  : "text"
-                            }
-                            className="w-full text-center text-xs p-1 bg-white border-b border-blue-200 focus:border-blue-500 outline-none"
-                            value={String(data[row.id] || "")}
-                            onChange={(e) =>
-                              handleEditChange(row.id, e.target.value)
-                            }
-                          />
-                        )
-                      ) : // --- VIEW MODE ---
-                      row.type === "file" ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-50 text-blue-600 text-[10px] font-medium cursor-pointer hover:bg-blue-100 truncate max-w-full">
-                          <FileText size={10} />
-                          <span className="truncate">
-                            {String(data[row.id] || "No File")}
-                          </span>
-                        </span>
+                  {activeFields.map((row) => (
+                    <div key={row.id} className="h-12 px-2 border-b border-slate-100 flex items-center justify-center text-xs text-slate-600">
+                      {row.type === "file" && product[row.id] ? (
+                         <a href={String(product[row.id])} target="_blank" className="flex items-center gap-1 text-blue-600 hover:underline px-2 py-1 bg-blue-50 rounded border border-blue-100">
+                            <FileText size={10} /> View
+                         </a>
                       ) : (
-                        <span className="truncate w-full px-1">
-                          {String(data[row.id] || "-")}
-                        </span>
+                         <span className="truncate">{String(product[row.id] || "-")}</span>
                       )}
                     </div>
                   ))}
 
-                  <div className="h-[65px] bg-orange-50/20 border-b border-orange-100/50 flex items-center justify-center">
-                    <span className="text-[9px] text-orange-300 font-mono">
-                      ---
-                    </span>
+                  {/* Locations List */}
+                  <div className="h-40 px-2 py-2 border-b border-slate-100 bg-slate-50/10 overflow-y-auto custom-scrollbar">
+                    {product.locations && product.locations.length > 0 ? (
+                        <div className="space-y-1">
+                            {product.locations.map((loc, i) => (
+                                <div key={i} className="flex justify-between items-center text-[10px] bg-white border border-slate-200 p-1.5 rounded shadow-sm">
+                                    <div className="flex flex-col leading-tight">
+                                        <span className="font-bold text-slate-700">{loc.city}</span>
+                                        <span className="text-[8px] text-slate-400">{loc.state}</span>
+                                    </div>
+                                    <span className="font-bold text-green-600">₹{loc.price}</span>
+                                </div>
+                            ))}
+                        </div>
+                    ) : (
+                        <div className="h-full flex items-center justify-center text-[10px] text-slate-400 italic">No Locations</div>
+                    )}
                   </div>
-
-                  {locations.map((city) => {
-                    const fieldKey = `price_location_${city}`;
-                    return (
-                      <div
-                        key={city}
-                        className="h-12 px-2 border-b border-slate-100 flex items-center justify-center text-xs text-slate-600 bg-orange-50/5"
-                      >
-                        {isEditing ? (
-                          <div className="relative w-full">
-                            <span className="absolute left-1 top-1.5 text-slate-400 text-[10px]">
-                              ₹
-                            </span>
-                            <input
-                              type="number"
-                              className="w-full text-center text-xs p-1 bg-white border border-orange-200 rounded focus:ring-2 focus:ring-orange-100 outline-none pl-3"
-                              value={String(data[fieldKey] || "")}
-                              onChange={(e) =>
-                                handleEditChange(fieldKey, e.target.value)
-                              }
-                            />
-                          </div>
-                        ) : (
-                          <span className="font-mono">
-                            {data[fieldKey] ? `₹ ${data[fieldKey]}` : "-"}
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
                 </div>
-              </div>
-            );
-          })}
+            </div>
+          ))}
 
-          {/* --- ADD NEW PRODUCT COLUMN --- */}
-          <div className="w-[240px] flex-shrink-0 border-r border-dashed border-slate-300 bg-slate-50/50 flex flex-col hover:bg-slate-50 transition-colors">
-            <div className="h-[120px] p-4 border-b border-slate-200 flex flex-col justify-center items-center gap-2 text-slate-400 sticky top-0 z-30 bg-slate-50">
-              <div className="w-10 h-10 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center mb-1">
-                <Plus size={20} />
+          {/* --- RIGHT: ADD / EDIT PRODUCT COLUMN --- */}
+          <div className={`w-[280px] flex-shrink-0 border-r border-dashed bg-slate-50 flex flex-col transition-colors h-full ${editingId ? 'border-blue-300 bg-blue-50/50' : 'border-slate-300 hover:bg-white'}`}>
+            <div className={`h-[120px] p-4 border-b border-slate-200 flex flex-col justify-center items-center gap-2 sticky top-0 z-30 ${editingId ? 'bg-blue-100/50' : ''}`}>
+              <div className={`w-10 h-10 rounded-full flex items-center justify-center mb-1 text-white shadow-lg ${editingId ? 'bg-green-500' : (activeTab === 'inverter' ? 'bg-blue-600' : 'bg-orange-500')}`}>
+                {editingId ? <Edit2 size={18}/> : <Plus size={20} />}
               </div>
-              <span className="text-[10px] font-bold uppercase tracking-widest">
-                New Product
-              </span>
+              <div className="flex flex-col items-center">
+                  <span className={`text-[10px] font-bold uppercase tracking-widest ${editingId ? 'text-blue-700' : 'text-slate-400'}`}>
+                      {editingId ? 'Editing Product' : `Add New ${activeTab}`}
+                  </span>
+                  {editingId && <button onClick={cancelEditing} className="text-[9px] text-red-500 underline mt-1">Cancel Edit</button>}
+              </div>
             </div>
 
-            <div className="p-3 space-y-2">
-              <div className="h-12 flex items-center">
-                <input
-                  className="w-full text-center text-xs p-2 bg-white border border-slate-300 rounded shadow-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
-                  placeholder="Enter Name..."
-                  value={String(newCol.name || "")}
-                  onChange={(e) =>
-                    setNewCol({ ...newCol, name: e.target.value })
-                  }
-                />
+            <div className="flex-1 overflow-y-auto p-2">
+              <div className="h-12 flex items-center mb-0">
+                <input className="w-full text-center text-xs p-2 bg-white border border-slate-300 rounded shadow-sm outline-none focus:border-blue-500" placeholder="Product Name" value={String(formData.name || "")} onChange={(e) => setFormData({ ...formData, name: e.target.value })} />
               </div>
-              {rows.map((row) => (
+              <div className="h-12 flex items-center mb-0">
+                <input className="w-full text-center text-xs p-2 bg-white border border-slate-300 rounded shadow-sm outline-none focus:border-blue-500" placeholder="Base Price" type="number" value={String(formData.price_ex_factory || "")} onChange={(e) => setFormData({ ...formData, price_ex_factory: Number(e.target.value) })} />
+              </div>
+              
+              {activeFields.map((row) => (
                 <div key={row.id} className="h-12 flex items-center">
                   {row.type === "select" ? (
-                    <select
-                      className="w-full text-xs p-2 bg-white border border-slate-200 rounded focus:border-blue-400 outline-none text-slate-500"
-                      value={String(newCol[row.id] || "")}
-                      onChange={(e) =>
-                        setNewCol({ ...newCol, [row.id]: e.target.value })
-                      }
-                    >
+                    <select className="w-full text-xs p-2 bg-white border border-slate-200 rounded outline-none text-slate-500" value={String(formData[row.id] || "")} onChange={(e) => setFormData({ ...formData, [row.id]: e.target.value })}>
                       <option value="">{row.label}</option>
-                      {(row.options || []).map((o: string) => (
-                        <option key={o} value={o}>
-                          {o}
-                        </option>
-                      ))}
+                      {(row.options || []).map((o) => <option key={o} value={o}>{o}</option>)}
                     </select>
                   ) : row.type === "file" ? (
                     <label className="w-full h-8 cursor-pointer flex items-center justify-center gap-2 text-xs bg-white border border-dashed border-slate-300 rounded hover:bg-blue-50 hover:border-blue-300 hover:text-blue-600 transition-all text-slate-400">
-                      <UploadCloud size={14} />
-                      <span className="truncate max-w-[100px]">
-                        {String(newCol[row.id] || "Upload File")}
-                      </span>
-                      <input
-                        type="file"
-                        className="hidden"
-                        onChange={(e) =>
-                          handleFileChange(row.id, e.target.files?.[0], true)
-                        }
-                      />
+                      <UploadCloud size={14} /> 
+                      <span className="truncate max-w-[100px]">{formData[row.id] && String(formData[row.id]).includes('http') ? "Updated" : (formData[row.id] ? "File Exists" : "Upload")}</span>
+                      <input type="file" className="hidden" onChange={(e) => handleFileChange(row.id, e.target.files?.[0])} />
                     </label>
+                  ) : row.type === "date" ? (
+                    <input type="date" className="w-full text-center text-xs p-2 bg-white border border-slate-200 rounded outline-none focus:border-blue-400" value={String(formData[row.id] || "")} onChange={(e) => setFormData({ ...formData, [row.id]: e.target.value })} />
                   ) : (
-                    <input
-                      className="w-full text-center text-xs p-2 bg-white border border-slate-200 rounded focus:border-blue-400 outline-none"
-                      placeholder={row.label}
-                      value={String(newCol[row.id] || "")}
-                      onChange={(e) =>
-                        setNewCol({ ...newCol, [row.id]: e.target.value })
-                      }
-                      type={
-                        row.type === "number"
-                          ? "number"
-                          : row.type === "date"
-                            ? "date"
-                            : "text"
-                      }
-                    />
+                    <input className="w-full text-center text-xs p-2 bg-white border border-slate-200 rounded outline-none focus:border-blue-400" placeholder={row.label} value={String(formData[row.id] || "")} onChange={(e) => setFormData({ ...formData, [row.id]: e.target.value })} type={row.type === "number" ? "number" : "text"} />
                   )}
                 </div>
               ))}
-              <div className="h-4"></div>
-              <button
-                onClick={handleAddColumn}
-                className="w-full py-3 bg-slate-800 text-white rounded-lg shadow-lg hover:bg-slate-700 hover:shadow-xl transition-all flex items-center justify-center gap-2 text-xs font-bold tracking-wide transform active:scale-95"
-              >
-                <Plus size={14} /> ADD COLUMN
-              </button>
+
+              {/* Location Manager */}
+              <div className="h-40 p-2 bg-white border border-slate-200 rounded mt-0 flex flex-col gap-2 shadow-inner">
+                 <div className="flex gap-1">
+                    <select className="flex-1 text-[9px] border p-1 rounded bg-slate-50" value={locInput.state} onChange={e => setLocInput({...locInput, state: e.target.value})}>
+                        <option value="">State</option>
+                        {INDIAN_STATES.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                 </div>
+                 <div className="flex gap-1">
+                    <input className="flex-1 text-[9px] border p-1 rounded bg-slate-50" placeholder="City" value={locInput.city} onChange={e => setLocInput({...locInput, city: e.target.value})} />
+                    <input className="w-12 text-[9px] border p-1 rounded bg-slate-50" placeholder="₹" type="number" value={locInput.price} onChange={e => setLocInput({...locInput, price: e.target.value})} />
+                    <button onClick={addLocation} className="bg-slate-800 text-white text-[9px] px-2 rounded">+</button>
+                 </div>
+                 
+                 <div className="flex-1 overflow-y-auto bg-slate-50 rounded border border-slate-100 p-1 space-y-1">
+                    {locations.map((loc, i) => (
+                        <div key={i} className="flex justify-between items-center bg-white border border-slate-200 px-1.5 py-1 rounded text-[9px]">
+                            <span>{loc.city}</span>
+                            <div className="flex gap-2">
+                                <span className="font-bold">₹{loc.price}</span>
+                                <button onClick={() => removeLocation(i)} className="text-red-500 font-bold">×</button>
+                            </div>
+                        </div>
+                    ))}
+                    {locations.length === 0 && <p className="text-[8px] text-center text-slate-400 mt-2">Add locations here</p>}
+                 </div>
+              </div>
+
+              <div className="p-3">
+                <button onClick={handleSaveProduct} className={`w-full py-3 text-white rounded-lg shadow-lg hover:shadow-xl transition-all flex items-center justify-center gap-2 text-xs font-bold transform active:scale-95 ${editingId ? 'bg-green-600 hover:bg-green-700' : (activeTab === 'inverter' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-orange-500 hover:bg-orange-700')}`}>
+                    {editingId ? <><Save size={14}/> UPDATE PRODUCT</> : <><Plus size={14}/> SAVE PRODUCT</>}
+                </button>
+              </div>
             </div>
           </div>
-
-          <div className="w-20 shrink-0"></div>
+          
+          <div className="w-20 shrink-0 bg-slate-50"></div>
         </div>
       </div>
     </div>

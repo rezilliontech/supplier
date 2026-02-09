@@ -3,6 +3,9 @@ import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { v4 as uuidv4 } from "uuid";
 import { compressImage } from "@/lib/image-compresser";
 
+// Constants
+const MAX_PDF_SIZE = 5 * 1024 * 1024; // 5 MB in bytes
+
 // 1. Initialize the S3 Client
 const s3Client = new S3Client({
   region: process.env.AWS_REGION || "ap-south-1",
@@ -23,13 +26,25 @@ async function uploadToS3(
   const uniqueFileName = `${uuidv4()}.${fileExtension}`;
   const key = `supplier/products/${uniqueFileName}`;
 
-  const processed = await compressImage(buffer);
+  let finalBuffer = buffer;
+  let finalContentType = contentType;
+
+  // Only compress if it is an image
+  if (contentType.startsWith("image/")) {
+    try {
+      const processed = await compressImage(buffer);
+      finalBuffer = processed.buffer;
+      finalContentType = processed.contentType;
+    } catch (error) {
+      console.warn("Compression failed, using original file:", error);
+    }
+  }
 
   const uploadParams = {
     Bucket: BUCKET_NAME,
     Key: key,
-    Body: processed.buffer,
-    ContentType: processed.contentType,
+    Body: finalBuffer,
+    ContentType: finalContentType,
     CacheControl: "max-age=31536000",
     Metadata: {
       originalName: fileName,
@@ -45,7 +60,6 @@ async function uploadToS3(
 
 export async function POST(request: NextRequest) {
   try {
-    // Parse FormData instead of JSON
     const formData = await request.formData();
     const file = formData.get("file") as File;
 
@@ -53,11 +67,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "File is required." }, { status: 400 });
     }
 
-    // Convert File to Buffer
+    // --- CHECK PDF SIZE ---
+    if (file.type === "application/pdf" && file.size > MAX_PDF_SIZE) {
+      return NextResponse.json(
+        { error: "PDF file size exceeds the 5MB limit." },
+        { status: 400 }
+      );
+    }
+    // ----------------------
+
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
-    // Upload to S3
     const url = await uploadToS3(buffer, file.name, file.type);
 
     return NextResponse.json({ url });
