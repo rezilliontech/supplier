@@ -11,9 +11,9 @@ export async function GET(req: Request) {
 
     if (!supplierId) return NextResponse.json({ error: 'ID required' }, { status: 400 });
 
-    // JOIN product + product_pricing
-    // We group pricing rows into a JSON array called 'locations'
-    const query = `
+    // 1. FETCH PRODUCT DATA
+    // Updated: ORDER BY p.row_order ASC so the drag-and-drop order persists
+    const productQuery = `
       SELECT 
         p.*,
         COALESCE(
@@ -26,16 +26,32 @@ export async function GET(req: Request) {
       LEFT JOIN product_pricing pp ON p.id = pp.product_id
       WHERE p.supplier_id = $1
       GROUP BY p.id
-      ORDER BY p.id DESC
+      ORDER BY p.row_order ASC, p.id DESC
     `;
     
-    const result = await client.query(query, [supplierId]);
-    
-    // Fetch custom UI settings if needed
-    const settingsRes = await client.query(`SELECT setting_value FROM dashboard_settings WHERE setting_key = 'rows'`);
-    const rows = settingsRes.rows[0]?.setting_value || [];
+    const productResult = await client.query(productQuery, [supplierId]);
 
-    return NextResponse.json({ products: result.rows, rows });
+    // 2. FETCH SUPPLIER PROFILE
+    const profileQuery = `
+      SELECT 
+        company_name as "companyName",
+        email,
+        phone,
+        website,
+        location,
+        about_us as "aboutUs",
+        gallery
+      FROM suppliers 
+      WHERE id = $1
+    `;
+    const profileResult = await client.query(profileQuery, [supplierId]);
+    const profile = profileResult.rows[0] || {};
+
+    // Return combined data
+    return NextResponse.json({ 
+      products: productResult.rows, 
+      profile: profile
+    });
 
   } catch (error) {
     console.error(error);
@@ -62,51 +78,98 @@ export async function POST(req: Request) {
       if (!locs || locs.length === 0) return;
       
       const values: (number | string)[] = [];
-      const placeholders = locs.map((_, i) => {
-        const base = i * 4;
-        values.push(productId, _.state, _.city, _.price);
-        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`;
+      const placeholders = locs.map((loc, i) => {
+        const offset = i * 4;
+        values.push(productId, loc.state, loc.city, loc.price);
+        return `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4})`;
       }).join(',');
 
-      await client.query(
-        `INSERT INTO product_pricing (product_id, state, city, price) VALUES ${placeholders}`,
-        values
-      );
+      const query = `INSERT INTO product_pricing (product_id, state, city, price) VALUES ${placeholders}`;
+      await client.query(query, values);
     };
 
-    // --- CREATE PRODUCT ---
+    // --- ACTION: REORDER PRODUCTS (New) ---
+    // Updates the row_order column for a list of products
+    if (action === 'reorder_products') {
+      const { items } = data; // Expects array of { id, row_order }
+      
+      try {
+        await client.query('BEGIN');
+        for (const item of items) {
+          await client.query(
+            'UPDATE products SET row_order = $1 WHERE id = $2', 
+            [item.row_order, item.id]
+          );
+        }
+        await client.query('COMMIT');
+        return NextResponse.json({ success: true });
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      }
+    }
+
+    // --- ACTION: UPDATE PROFILE ---
+    if (action === 'update_profile') {
+      const { supplierId, companyName, phone, website, location, aboutUs, gallery } = data;
+
+      const updateQuery = `
+        UPDATE suppliers 
+        SET 
+          company_name = $1,
+          phone = $2,
+          website = $3,
+          location = $4,
+          about_us = $5,
+          gallery = $6
+        WHERE id = $7
+      `;
+      
+      await client.query(updateQuery, [companyName, phone, website, location, aboutUs, gallery, supplierId]);
+      return NextResponse.json({ success: true });
+    }
+
+    // --- ACTION: CREATE PRODUCT ---
     if (action === 'create_product') {
       const { 
         name, supplierId, category, technology, type,
-        power_kw, min_order, qty_mw, availability, 
+        power_kw, min_order, qty_mw, availability_days, stock_location, // Added new fields
         datasheet, panfile, ondfile, validity, price_ex_factory,
-        locations, // Array from frontend
+        locations, 
         ...restAttributes 
       } = data;
 
       try {
         await client.query('BEGIN');
 
+        // 1. Calculate the next row_order (put at the end of the list)
+        const orderRes = await client.query(
+          'SELECT COALESCE(MAX(row_order), 0) + 1 as next_order FROM products WHERE supplier_id = $1', 
+          [supplierId]
+        );
+        const nextOrder = orderRes.rows[0].next_order;
+
+        // 2. Insert Product
         const insertProduct = `
           INSERT INTO products (
             supplier_id, name, category, technology, type,
-            power_kw, min_order, qty_mw, availability_days, 
+            power_kw, min_order, qty_mw, availability_days, stock_location,
             datasheet, panfile, ondfile, validity, price_ex_factory,
-            attributes
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) 
+            attributes, row_order
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) 
           RETURNING id
         `;
         
         const res = await client.query(insertProduct, [
           supplierId, name, category || 'module', technology, type,
-          power_kw, min_order, qty_mw, availability,
+          power_kw, min_order, qty_mw, availability_days, stock_location,
           datasheet, panfile, ondfile, validity, price_ex_factory,
-          JSON.stringify(restAttributes)
+          JSON.stringify(restAttributes), nextOrder
         ]);
         
         const newId = res.rows[0].id;
 
-        // Save Locations to second table
+        // 3. Save Locations
         await insertLocations(newId, locations);
 
         await client.query('COMMIT');
@@ -117,11 +180,11 @@ export async function POST(req: Request) {
       }
     }
 
-    // --- UPDATE PRODUCT ---
+    // --- ACTION: UPDATE PRODUCT ---
     if (action === 'update_product') {
       const { 
         id, name, category, technology, type,
-        power_kw, min_order, qty_mw, availability, 
+        power_kw, min_order, qty_mw, availability_days, stock_location, // Added new fields
         datasheet, panfile, ondfile, validity, price_ex_factory,
         locations,
         ...restAttributes 
@@ -133,15 +196,15 @@ export async function POST(req: Request) {
         const updateProduct = `
           UPDATE products SET 
             name=$1, category=$2, technology=$3, type=$4,
-            power_kw=$5, min_order=$6, qty_mw=$7, availability_days=$8,
-            datasheet=$9, panfile=$10, ondfile=$11, validity=$12, price_ex_factory=$13,
-            attributes=$14
-          WHERE id=$15
+            power_kw=$5, min_order=$6, qty_mw=$7, availability_days=$8, stock_location=$9,
+            datasheet=$10, panfile=$11, ondfile=$12, validity=$13, price_ex_factory=$14,
+            attributes=$15
+          WHERE id=$16
         `;
 
         await client.query(updateProduct, [
           name, category, technology, type,
-          power_kw, min_order, qty_mw, availability,
+          power_kw, min_order, qty_mw, availability_days, stock_location,
           datasheet, panfile, ondfile, validity, price_ex_factory,
           JSON.stringify(restAttributes), id
         ]);
@@ -158,9 +221,8 @@ export async function POST(req: Request) {
       }
     }
 
-    // --- DELETE PRODUCT ---
+    // --- ACTION: DELETE PRODUCT ---
     if (action === 'delete_product') {
-      // Cascade delete will handle the pricing table automatically
       await client.query(`DELETE FROM products WHERE id = $1`, [data.id]);
       return NextResponse.json({ success: true });
     }

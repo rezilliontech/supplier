@@ -96,7 +96,7 @@ export async function GET(req: Request) {
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     // --- Sorting Logic ---
-    let orderBy = 'ORDER BY p.id DESC';
+    let orderBy = 'ORDER BY p.row_order ASC, p.id DESC';
     switch (sort) {
       case 'price_asc':
         orderBy = `ORDER BY COALESCE((SELECT MIN(price) FROM product_pricing WHERE product_id = p.id), p.price_ex_factory) ASC NULLS LAST`;
@@ -114,21 +114,30 @@ export async function GET(req: Request) {
       SELECT 
         p.id, 
         p.name, 
-        s.company_name as supplier_name,
         p.supplier_id,
         p.category,
         p.technology,
         p.type, 
         p.power_kw,
         p.min_order,
-        p.qty_mw,
-        p.availability_days,
-        p.validity,  -- Added Validity here
+        p.qty_mw,            
+        p.stock_location,    
+        p.availability_days, 
+        p.validity,
         p.datasheet,
         p.panfile, 
         p.ondfile,
         p.price_ex_factory, 
         p.attributes,
+        
+        -- Supplier Details (Added s.location)
+        s.company_name as supplier_name,
+        s.location as supplier_location, 
+        s.about_us as supplier_about,
+        s.gallery as supplier_gallery,
+        s.email as supplier_email,
+        s.phone as supplier_phone,
+        s.website as supplier_website,
         
         -- Aggregate Locations
         COALESCE(
@@ -143,7 +152,15 @@ export async function GET(req: Request) {
       LEFT JOIN suppliers s ON p.supplier_id = s.id
       LEFT JOIN product_pricing pp ON p.id = pp.product_id
       ${whereClause}
-      GROUP BY p.id, s.company_name
+      GROUP BY 
+        p.id, 
+        s.company_name, 
+        s.location, -- Added to GROUP BY
+        s.about_us, 
+        s.gallery, 
+        s.email, 
+        s.phone, 
+        s.website
       ${orderBy}
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
@@ -158,10 +175,8 @@ export async function GET(req: Request) {
     const products = result.rows.map((row) => {
       const attributes = row.attributes || {};
       
-      // Determine display price (Use base price, or lowest location price if available)
       let displayPrice = Number(row.price_ex_factory) || 0;
       
-      // If we have location prices, find the lowest one to show "From ₹X"
       if (Array.isArray(row.locations) && row.locations.length > 0) {
           const locPrices = row.locations.map((l: Location) => Number(l.price));
           const minLoc = Math.min(...locPrices);
@@ -177,13 +192,17 @@ export async function GET(req: Request) {
         supplierId: row.supplier_id,
         category: row.category,
         
-        // Mapped Fields
         technology: row.technology, 
         type: row.type,
         power: Number(row.power_kw) || 0,
         moq: row.min_order,
+        
+        qty_mw: Number(row.qty_mw) || 0,
+        stock_location: row.stock_location,
         availability: row.availability_days,
-        validity: row.validity, // Now correctly passed
+        availability_days: row.availability_days, 
+        
+        validity: row.validity, 
         priceEx: displayPrice,
         
         datasheet: row.datasheet,
@@ -191,6 +210,15 @@ export async function GET(req: Request) {
         ondfile: row.ondfile,
 
         locations: row.locations, 
+        
+        // Mapped Supplier Fields (Added location)
+        supplier_location: row.supplier_location,
+        supplier_about: row.supplier_about,
+        supplier_gallery: row.supplier_gallery || [],
+        supplier_email: row.supplier_email,
+        supplier_phone: row.supplier_phone,
+        supplier_website: row.supplier_website,
+
         ...attributes, 
       };
     });
